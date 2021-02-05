@@ -176,12 +176,12 @@ public class OnDiscardShouldNotLeakTest {
 			if (subscriptionsNumber == 1) {
 				Tracked value = tracker.track(1);
 				RaceTestUtils.race(
-						() -> RaceTestUtils.race(
-								assertSubscriber::cancel,
-								() -> assertSubscriber.request(Long.MAX_VALUE),
-								scheduler),
-						() -> testPublishers[0].next(value),
-						scheduler);
+						scheduler, () -> RaceTestUtils.race(
+								scheduler, assertSubscriber::cancel,
+								() -> assertSubscriber.request(Long.MAX_VALUE)
+						),
+						() -> testPublishers[0].next(value)
+				);
 			}
 			else {
 				int startIndex = --index[0];
@@ -189,26 +189,26 @@ public class OnDiscardShouldNotLeakTest {
 				int secondIndex = --index[0];
 				Tracked value2 = tracker.track(secondIndex);
 				Runnable action = () -> RaceTestUtils.race(
-						() -> testPublishers[startIndex].next(value1),
-						() -> testPublishers[secondIndex].next(value2),
-						scheduler);
+						scheduler, () -> testPublishers[startIndex].next(value1),
+						() -> testPublishers[secondIndex].next(value2)
+				);
 
 				while (index[0] > 0) {
 					int nextIndex = --index[0];
 					Tracked nextValue = tracker.track(nextIndex);
 					Runnable nextAction = action;
 					action = () -> RaceTestUtils.race(
-							nextAction,
-							() -> testPublishers[nextIndex].next(nextValue),
-							scheduler);
+							scheduler, nextAction,
+							() -> testPublishers[nextIndex].next(nextValue)
+					);
 				}
-				RaceTestUtils.race(() ->
+				RaceTestUtils.race(scheduler, () ->
 						RaceTestUtils.race(
-								assertSubscriber::cancel,
-								() -> assertSubscriber.request(Long.MAX_VALUE),
-								scheduler),
-						action,
-						scheduler);
+								scheduler, assertSubscriber::cancel,
+								() -> assertSubscriber.request(Long.MAX_VALUE)
+						),
+						action
+				);
 			}
 
 			List<Tracked> values = assertSubscriber.values();
@@ -265,9 +265,9 @@ public class OnDiscardShouldNotLeakTest {
 			Tracked value23 = tracker.track(secondIndex+"3");
 			Tracked value24 = tracker.track(secondIndex+"4");
 			Runnable action = () -> RaceTestUtils.race(
-					() -> testPublishers[startIndex].next(value11, value12, value13, value14),
-					() -> testPublishers[secondIndex].next(value21, value22, value23, value24),
-					scheduler);
+					scheduler, () -> testPublishers[startIndex].next(value11, value12, value13, value14),
+					() -> testPublishers[secondIndex].next(value21, value22, value23, value24)
+			);
 
 			while (index[0] > 0) {
 				int nextIndex = --index[0];
@@ -277,17 +277,17 @@ public class OnDiscardShouldNotLeakTest {
 				Tracked nextValue4 = tracker.track(nextIndex+"4");
 				Runnable nextAction = action;
 				action = () -> RaceTestUtils.race(
-						nextAction,
-						() -> testPublishers[nextIndex].next(nextValue1, nextValue2, nextValue3, nextValue4),
-						scheduler);
+						scheduler, nextAction,
+						() -> testPublishers[nextIndex].next(nextValue1, nextValue2, nextValue3, nextValue4)
+				);
 			}
-			RaceTestUtils.race(() ->
+			RaceTestUtils.race(scheduler, () ->
 					RaceTestUtils.race(
-							assertSubscriber::cancel,
-							() -> assertSubscriber.request(Long.MAX_VALUE),
-							scheduler),
-					action,
-					scheduler);
+							scheduler, assertSubscriber::cancel,
+							() -> assertSubscriber.request(Long.MAX_VALUE)
+					),
+					action
+			);
 			List<Tracked> values = assertSubscriber.values();
 			values.forEach(Tracked::release);
 
@@ -336,11 +336,11 @@ public class OnDiscardShouldNotLeakTest {
 			Tracked value4 = tracker.track(4);
 			Tracked value5 = tracker.track(5);
 
-			RaceTestUtils.race(assertSubscriber::cancel, () -> {
+			RaceTestUtils.race(scheduler, assertSubscriber::cancel, () -> {
 				testPublisher.next(value3);
 				testPublisher.next(value4);
 				testPublisher.next(value5);
-			}, scheduler);
+			});
 
 			List<Tracked> values = assertSubscriber.values();
 			values.forEach(Tracked::release);
@@ -389,9 +389,9 @@ public class OnDiscardShouldNotLeakTest {
 			testPublisher.next(tracker.track(4));
 
 			RaceTestUtils.race(
-					assertSubscriber::cancel,
-					() -> testPublisher.complete(),
-					scheduler);
+					scheduler, assertSubscriber::cancel,
+					() -> testPublisher.complete()
+			);
 
 			List<Tracked> values = assertSubscriber.values();
 			values.forEach(Tracked::release);
@@ -441,9 +441,9 @@ public class OnDiscardShouldNotLeakTest {
 			testPublisher.next(tracker.track(4));
 
 			RaceTestUtils.race(
-					assertSubscriber::cancel,
-					() -> testPublisher.error(new RuntimeException("test")),
-					scheduler);
+					scheduler, assertSubscriber::cancel,
+					() -> testPublisher.error(new RuntimeException("test"))
+			);
 
 			List<Tracked> values = assertSubscriber.values();
 			values.forEach(Tracked::release);
@@ -559,9 +559,9 @@ public class OnDiscardShouldNotLeakTest {
 			testPublisher.next(tracker.track(4));
 
 			RaceTestUtils.race(
-					assertSubscriber::cancel,
-					() -> assertSubscriber.request(Long.MAX_VALUE),
-					scheduler);
+					scheduler, assertSubscriber::cancel,
+					() -> assertSubscriber.request(Long.MAX_VALUE)
+			);
 
 			List<Tracked> values = assertSubscriber.values();
 			values.forEach(Tracked::release);
