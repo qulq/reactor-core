@@ -18,17 +18,13 @@ package reactor.core.publisher;
 
 import java.util.Objects;
 import java.util.concurrent.Callable;
-import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
 import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
-import java.util.stream.Stream;
 
 import org.reactivestreams.Publisher;
 import org.reactivestreams.Subscription;
 import reactor.core.CoreSubscriber;
 import reactor.core.Fuseable;
 import reactor.core.Scannable;
-import reactor.util.annotation.Nullable;
-import reactor.util.context.Context;
 
 /**
  * Concatenates a several Mono sources with a final Mono source by
@@ -50,10 +46,8 @@ final class MonoIgnoreThen<T> extends Mono<T> implements Fuseable, Scannable {
     
     @Override
     public void subscribe(CoreSubscriber<? super T> actual) {
-        ThenIgnoreMain<T> manager = new ThenIgnoreMain<>(actual, ignore, last);
+        ThenIgnoreMain<T> manager = new ThenIgnoreMain<>(actual, this.ignore, this.last);
         actual.onSubscribe(manager);
-        
-        manager.drain();
     }
     
     /**
@@ -64,11 +58,11 @@ final class MonoIgnoreThen<T> extends Mono<T> implements Fuseable, Scannable {
      */
     <U> MonoIgnoreThen<U> shift(Mono<U> newLast) {
         Objects.requireNonNull(newLast, "newLast");
-        Publisher<?>[] a = ignore;
+        Publisher<?>[] a = this.ignore;
         int n = a.length;
         Publisher<?>[] b = new Publisher[n + 1];
         System.arraycopy(a, 0, b, 0, n);
-        b[n] = last;
+        b[n] = this.last;
         
         return new MonoIgnoreThen<>(b, newLast);
     }
@@ -78,244 +72,152 @@ final class MonoIgnoreThen<T> extends Mono<T> implements Fuseable, Scannable {
         return null; //no particular key to be represented, still useful in hooks
     }
     
-    static final class ThenIgnoreMain<T>
-            extends Operators.MonoSubscriber<T, T> {
-        final ThenIgnoreInner ignore;
-        
-        final ThenAcceptInner<T> accept;
+    static final class ThenIgnoreMain<T> implements InnerOperator<T, T> {
         
         final Publisher<?>[] ignoreMonos;
 
         final Mono<T> lastMono;
 
+        final CoreSubscriber<? super T> actual;
+
         int index;
-        
-        volatile boolean active;
-        
-        volatile int wip;
+
+        volatile Subscription activeSubscription;
+
         @SuppressWarnings("rawtypes")
-        static final AtomicIntegerFieldUpdater<ThenIgnoreMain> WIP =
-                AtomicIntegerFieldUpdater.newUpdater(ThenIgnoreMain.class, "wip");
+        static final AtomicReferenceFieldUpdater<ThenIgnoreMain, Subscription> ACTIVE_SUBSCRIPTION =
+                AtomicReferenceFieldUpdater.newUpdater(ThenIgnoreMain.class, Subscription.class, "activeSubscription");
         
         ThenIgnoreMain(CoreSubscriber<? super T> subscriber,
 		        Publisher<?>[] ignoreMonos, Mono<T> lastMono) {
-            super(subscriber);
+            this.actual = subscriber;
             this.ignoreMonos = ignoreMonos;
             this.lastMono = lastMono;
-            this.ignore = new ThenIgnoreInner(this);
-            this.accept = new ThenAcceptInner<>(this);
+
+            ACTIVE_SUBSCRIPTION.lazySet(this, Operators.EmptySubscription.INSTANCE);
         }
 
-	    @Override
-	    public Stream<? extends Scannable> inners() {
-		    return Stream.of(ignore, accept);
-	    }
+        @Override
+        public CoreSubscriber<? super T> actual() {
+            return this.actual;
+        }
 
-	    @SuppressWarnings("unchecked")
-        void drain() {
-            if (WIP.getAndIncrement(this) != 0) {
-                return;
+        @Override
+        public void cancel() {
+            Operators.terminate(ACTIVE_SUBSCRIPTION, this);
+        }
+
+        @Override
+        public void request(long n) {
+            final Subscription current = this.activeSubscription;
+            if (current == Operators.EmptySubscription.INSTANCE && ACTIVE_SUBSCRIPTION.getAndSet(this, null) == Operators.EmptySubscription.INSTANCE) {
+                subscribeNext();
             }
-            
-            for (;;) {
-                if (isCancelled()) {
-                    return;
-                }
-                
-                if (!active) {
-
-                    Publisher<?>[] a = ignoreMonos;
-                    int i = index;
-                    if (i == a.length) {
-                        ignore.clear();
-                        Mono<T> m = lastMono;
-                        if (m instanceof Callable) {
-                            T v;
-                            try {
-                                v = ((Callable<T>)m).call();
-                            }
-                            catch (Throwable ex) {
-	                            actual.onError(Operators.onOperatorError(ex,
-                                        actual.currentContext()));
-	                            return;
-                            }
-                            
-                            if (v == null) {
-                                actual.onComplete();
-                            }
-                            else {
-                                complete(v);
-                            }
-                            return;
-                        }
-                        
-                        active = true;
-                        m.subscribe(accept);
-                    } else {
-                        Publisher<?> m = a[i];
-                        index = i + 1;
-                        
-                        if (m instanceof Callable) {
-                            try {
-                                ((Callable<?>)m).call();
-                            }
-                            catch (Throwable ex) {
-	                            actual.onError(Operators.onOperatorError(ex,
-                                        actual.currentContext()));
-	                            return;
-                            }
-                            
-                            continue;
-                        }
-                        
-                        active = true;
-                        m.subscribe(ignore);
-                    }
-                }
-                if (WIP.decrementAndGet(this) == 0) {
-                    break;
-                }
-            }
-        }
-        
-        @Override
-        public void cancel() {
-            super.cancel();
-            ignore.cancel();
-            accept.cancel();
-        }
-        
-        void ignoreDone() {
-            active = false;
-            drain();
-        }
-    }
-    
-    static final class ThenIgnoreInner implements InnerConsumer<Object> {
-        final ThenIgnoreMain<?> parent;
-        
-        volatile Subscription s;
-        static final AtomicReferenceFieldUpdater<ThenIgnoreInner, Subscription> S =
-                AtomicReferenceFieldUpdater.newUpdater(ThenIgnoreInner.class, Subscription.class, "s");
-        
-        ThenIgnoreInner(ThenIgnoreMain<?> parent) {
-            this.parent = parent;
-        }
-
-	    @Override
-        @Nullable
-	    public Object scanUnsafe(Attr key) {
-            if (key == Attr.PARENT) return s;
-            if (key == Attr.ACTUAL) return parent;
-            if (key == Attr.CANCELLED) return s == Operators.cancelledSubscription();
-
-		    return null;
-	    }
-
-        @Override
-        public void onSubscribe(Subscription s) {
-            if (Operators.replace(S, this, s)) {
-                s.request(Long.MAX_VALUE);
-            }
-        }
-
-	    @Override
-	    public Context currentContext() {
-		    return parent.currentContext();
-	    }
-
-        @Override
-        public void onNext(Object t) {
-            // ignored
-            Operators.onDiscard(t, parent.currentContext()); //FIXME cache Context
-        }
-        
-        @Override
-        public void onError(Throwable t) {
-            this.parent.onError(t);
-        }
-        
-        @Override
-        public void onComplete() {
-            this.parent.ignoreDone();
-        }
-        
-        void cancel() {
-            Operators.terminate(S, this);
-        }
-        
-        void clear() {
-            S.lazySet(this, null);
-        }
-    }
-    
-    static final class ThenAcceptInner<T> implements InnerConsumer<T> {
-        final ThenIgnoreMain<T> parent;
-        
-        volatile Subscription s;
-        @SuppressWarnings("rawtypes")
-        static final AtomicReferenceFieldUpdater<ThenAcceptInner, Subscription> S =
-                AtomicReferenceFieldUpdater.newUpdater(ThenAcceptInner.class, Subscription.class, "s");
-
-        boolean done;
-        
-        ThenAcceptInner(ThenIgnoreMain<T> parent) {
-            this.parent = parent;
-        }
-
-        @Override
-        @Nullable
-        public Object scanUnsafe(Attr key) {
-            if (key == Attr.PARENT) return s;
-            if (key == Attr.ACTUAL) return parent;
-            if (key == Attr.TERMINATED) return done;
-            if (key == Attr.CANCELLED) return s == Operators.cancelledSubscription();
-
-            return null;
-        }
-
-        @Override
-        public Context currentContext() {
-            return parent.currentContext();
         }
 
         @Override
         public void onSubscribe(Subscription s) {
-            if (Operators.setOnce(S, this, s)) {
+            if (Operators.setOnce(ACTIVE_SUBSCRIPTION, this, s)) {
                 s.request(Long.MAX_VALUE);
             }
         }
-        
+
         @Override
         public void onNext(T t) {
-            if (done) {
-                Operators.onNextDropped(t, parent.currentContext());
+            if (this.index != this.ignoreMonos.length) {
+                // ignored
+                Operators.onDiscard(t, this.actual.currentContext());
                 return;
             }
-            done = true;
-            this.parent.complete(t);
-        }
-        
-        @Override
-        public void onError(Throwable t) {
-            if (done) {
-                Operators.onErrorDropped(t, parent.currentContext());
+
+            Subscription current = this.activeSubscription;
+            if (current == Operators.CancelledSubscription.INSTANCE) {
+                Operators.onDiscard(t, this.actual.currentContext());
                 return;
             }
-            done = true;
-            this.parent.onError(t);
+
+            this.actual.onNext(t);
         }
-        
+
         @Override
         public void onComplete() {
-            if (done) {
+            if (this.index != this.ignoreMonos.length) {
+                ACTIVE_SUBSCRIPTION.lazySet(this, null);
+                this.index++;
+                subscribeNext();
                 return;
             }
-            this.parent.onComplete();
+
+            Subscription current = this.activeSubscription;
+            if (current == Operators.CancelledSubscription.INSTANCE || ACTIVE_SUBSCRIPTION.getAndSet(
+                    this,
+                    Operators.CancelledSubscription.INSTANCE) == Operators.CancelledSubscription.INSTANCE) {
+                return;
+            }
+
+            this.actual.onComplete();
         }
-        
-        void cancel() {
-            Operators.terminate(S, this);
+
+        @SuppressWarnings({"unchecked", "rawtypes"})
+        void subscribeNext() {
+            final Publisher<?>[] a = this.ignoreMonos;
+
+            for (;;) {
+                final int i = this.index;
+
+                if (i == a.length) {
+                    Mono<T> m = this.lastMono;
+                    if (m instanceof Callable) {
+                        T v;
+                        try {
+                            v = ((Callable<T>)m).call();
+                        }
+                        catch (Throwable ex) {
+                            onError(Operators.onOperatorError(ex, this.actual.currentContext()));
+                            return;
+                        }
+
+                        if (v != null) {
+                            onNext(v);
+                        }
+                        onComplete();
+                    } else {
+                        m.subscribe(this);
+                    }
+                    return;
+                } else {
+                    final Publisher<?> m = a[i];
+
+                    if (m instanceof Callable) {
+                        try {
+                            ((Callable<?>) m).call();
+                        }
+                        catch (Throwable ex) {
+                            onError(Operators.onOperatorError(ex, this.actual.currentContext()));
+                            return;
+                        }
+
+                        this.index = i + 1;
+                        continue;
+                    }
+
+                    m.subscribe((CoreSubscriber) this);
+                    return;
+                }
+            }
+        }
+
+        @Override
+        public void onError(Throwable t) {
+            Subscription current = this.activeSubscription;
+            if (current == Operators.CancelledSubscription.INSTANCE || ACTIVE_SUBSCRIPTION.getAndSet(
+                    this,
+                    Operators.CancelledSubscription.INSTANCE) == Operators.CancelledSubscription.INSTANCE) {
+                Operators.onErrorDropped(t, this.actual.currentContext());
+                return;
+            }
+
+            this.actual.onError(t);
         }
     }
 }
